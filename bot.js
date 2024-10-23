@@ -82,6 +82,10 @@ bot.on("my_chat_member", async (ctx) => {
 bot.on("callback_query:data", adminMiddleware, async (ctx) => {
   const [action, groupId] = ctx.callbackQuery.data.split(":");
 
+  await ctx.deleteMessage();
+
+  const chatType = ctx.chat.type;
+
   if (action === "manage_schedule") {
     const keyboard = new InlineKeyboard()
       .text("Add Schedule", `add_schedule:${groupId}`)
@@ -113,7 +117,10 @@ bot.on("callback_query:data", adminMiddleware, async (ctx) => {
       } else {
         ctx.reply(`No schedule found for this group.`);
       }
-      return showGroupsMenu(ctx);
+
+      if (chatType == "private") {
+        return showGroupsMenu(ctx);
+      }
     } catch (error) {
       console.error("Error removing schedule:", error);
       ctx.reply("Error removing schedule. Please try again.");
@@ -125,7 +132,9 @@ bot.on("message", async (ctx) => {
   try {
     const action = ctx.session.currentAction;
 
-    if (!action?.type) {
+    const chatType = ctx.chat.type;
+
+    if (chatType == "prvate" && !action?.type) {
       ctx.reply(`Damingizni oling iltimos 😂️️`);
     }
 
@@ -141,8 +150,6 @@ bot.on("message", async (ctx) => {
       const group = await Group.findOne({ telegramId: groupId });
       await scheduleData.save();
       ctx.reply(`Schedule set for group ${group?.groupName} at ${time}`);
-
-      console.log("time.split", time.split(":"));
 
       const job = cron.schedule(
         `${time.split(":")[1]} ${time.split(":")[0]} * * *`,
@@ -163,11 +170,15 @@ bot.on("message", async (ctx) => {
       jobMap.set(groupId, job);
       ctx.session.currentAction = null;
 
-      return showGroupsMenu(ctx);
+      if (chatType == "private") {
+        return showGroupsMenu(ctx);
+      }
     }
   } catch (error) {
     console.log("Error, botOnMessage:", error);
-    ctx.reply(`Something went wrong!`);
+    if (chatType == "private") {
+      ctx.reply(`Something went wrong!`);
+    }
   }
 });
 
