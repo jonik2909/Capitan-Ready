@@ -1,8 +1,9 @@
 const dotenv = require("dotenv");
-dotenv.config();
+dotenv.config({
+  path: process.env.NODE_ENV === "production" ? ".env.production" : ".env",
+});
 const { Bot, InlineKeyboard } = require("grammy");
 const { session } = require("grammy");
-const adminController = require("./controllers/admin.controllers");
 
 const Group = require("./schema/Group");
 const cron = require("node-cron");
@@ -11,7 +12,7 @@ const Schedule = require("./schema/Schedule");
 const bot = new Bot(process.env.TOKEN);
 bot.use(
   session({
-    initial: () => ({ currentAction: null }), // Initialize session data
+    initial: () => ({ currentAction: null }),
   })
 );
 
@@ -100,11 +101,10 @@ bot.on("callback_query:data", adminMiddleware, async (ctx) => {
       const schedule = await Schedule.findOne({ groupId });
 
       if (schedule) {
-        // Stop the corresponding cron job if it exists
         const job = jobMap.get(schedule.groupId);
         if (job) {
           job.stop();
-          jobMap.delete(schedule.groupId); // Remove from the map
+          jobMap.delete(schedule.groupId);
           console.log(`Stopped job for group ${groupId}.`);
         }
 
@@ -113,6 +113,7 @@ bot.on("callback_query:data", adminMiddleware, async (ctx) => {
       } else {
         ctx.reply(`No schedule found for this group.`);
       }
+      return showGroupsMenu(ctx);
     } catch (error) {
       console.error("Error removing schedule:", error);
       ctx.reply("Error removing schedule. Please try again.");
@@ -123,6 +124,10 @@ bot.on("callback_query:data", adminMiddleware, async (ctx) => {
 bot.on("message", async (ctx) => {
   try {
     const action = ctx.session.currentAction;
+
+    if (!action?.type) {
+      ctx.reply(`Damingizni oling iltimos 😂️️`);
+    }
 
     if (action && action.type === "add") {
       const { groupId } = action;
@@ -157,6 +162,8 @@ bot.on("message", async (ctx) => {
 
       jobMap.set(groupId, job);
       ctx.session.currentAction = null;
+
+      return showGroupsMenu(ctx);
     }
   } catch (error) {
     console.log("Error, botOnMessage:", error);
@@ -167,5 +174,30 @@ bot.on("message", async (ctx) => {
 bot.catch((err) => {
   console.error("Error in bot:", err);
 });
+
+const showGroupsMenu = async (ctx) => {
+  try {
+    const groups = await Group.find({});
+
+    if (groups.length === 0) {
+      return ctx.reply("No groups found.");
+    }
+
+    const keyboard = new InlineKeyboard();
+    groups.forEach((group) => {
+      keyboard.text(
+        `${group.groupName.toUpperCase()}`,
+        `manage_schedule:${group.telegramId}`
+      );
+    });
+
+    await ctx.reply("Select a group to manage schedules:", {
+      reply_markup: keyboard,
+    });
+  } catch (error) {
+    console.error("Error retrieving groups:", error);
+    ctx.reply("Error retrieving groups. Please try again.");
+  }
+};
 
 module.exports = bot;

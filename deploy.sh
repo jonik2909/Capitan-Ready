@@ -1,3 +1,10 @@
-npm i
+#!/bin/bash
 
-pm2 start bot.js --name "CONTROLLER-BOT"
+# PRODUCTION
+git reset --hard
+git checkout master
+git pull origin master
+
+npm i
+npm run build
+pm2 start process.config.js --env production
