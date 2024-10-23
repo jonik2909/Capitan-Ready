@@ -1,20 +1,56 @@
 const dotenv = require("dotenv");
 dotenv.config();
-const { Bot } = require("grammy");
+const { Bot, InlineKeyboard } = require("grammy");
+const { session } = require("grammy");
+const adminController = require("./controllers/admin.controllers");
+
 const Group = require("./schema/Group");
 const cron = require("node-cron");
 const Schedule = require("./schema/Schedule");
 
 const bot = new Bot(process.env.TOKEN);
+bot.use(
+  session({
+    initial: () => ({ currentAction: null }), // Initialize session data
+  })
+);
 
-// Create a Map to store cron jobs
+const adminMiddleware = (ctx, next) => {
+  if (!isAdmin(ctx)) {
+    return ctx.reply("You are not authorized to use this bot.");
+  }
+  return next();
+};
+
 const jobMap = new Map();
 
-const ADMIN_ID = 399545508; // Replace with your admin ID
+const ADMIN_ID = 399545508;
+const isAdmin = (ctx) => ctx.from.id === ADMIN_ID;
 
-// Handle the bot start command
-bot.command("start", (ctx) => {
-  ctx.reply("Hello!");
+bot.command("start", adminMiddleware, async (ctx) => {
+  try {
+    const groups = await Group.find({});
+
+    if (groups.length === 0) {
+      return ctx.reply("No groups found.");
+    }
+
+    const keyboard = new InlineKeyboard();
+
+    groups.forEach((group) => {
+      keyboard.text(
+        `${group.groupName.toUpperCase()}`,
+        `manage_schedule:${group.telegramId}`
+      );
+    });
+
+    await ctx.reply("Select a group to manage schedules:", {
+      reply_markup: keyboard,
+    });
+  } catch (error) {
+    console.error("Error retrieving groups:", error);
+    ctx.reply("Error retrieving groups. Please try again.");
+  }
 });
 
 bot.on("my_chat_member", async (ctx) => {
@@ -42,82 +78,89 @@ bot.on("my_chat_member", async (ctx) => {
   }
 });
 
-// Middleware to check admin privileges
-const isAdmin = (ctx) => ctx.from.id === ADMIN_ID;
+bot.on("callback_query:data", adminMiddleware, async (ctx) => {
+  const [action, groupId] = ctx.callbackQuery.data.split(":");
 
-// Command to schedule messages
-bot.command("schedule", async (ctx) => {
-  try {
-    if (!isAdmin(ctx)) {
-      return ctx.reply("You do not have permission to use this command.");
-    }
+  if (action === "manage_schedule") {
+    const keyboard = new InlineKeyboard()
+      .text("Add Schedule", `add_schedule:${groupId}`)
+      .text("Remove Schedule", `remove_schedule:${groupId}`);
 
-    const [groupId, time, ...messageParts] = ctx.message.text
-      .split(" ")
-      .slice(1);
-    const message = messageParts.join(" ");
-
-    const scheduleData = new Schedule({
-      groupId,
-      message,
-      scheduleTime: time,
+    await ctx.reply("Choose an action:", {
+      reply_markup: keyboard,
     });
+  }
 
-    await scheduleData.save();
-    ctx.reply(`Schedule set for group ${groupId} at ${time}`);
+  if (action === "add_schedule") {
+    await ctx.reply("Please enter time (HH:MM):");
+    ctx.session.currentAction = { type: "add", groupId };
+  }
+  if (action === "remove_schedule") {
+    try {
+      const schedule = await Schedule.findOne({ groupId });
 
-    // Set cron job for the scheduled time
-    const job = cron.schedule(
-      `${time.split(":")[1]} ${time.split(":")[0]} * * *`,
-      async () => {
-        const group = await Group.findOne({ telegramId: groupId });
-        await bot.api.sendMessage(groupId, message);
-        console.log(`Message sent to group ${groupId}: ${message}`);
+      if (schedule) {
+        // Stop the corresponding cron job if it exists
+        const job = jobMap.get(schedule.groupId);
+        if (job) {
+          job.stop();
+          jobMap.delete(schedule.groupId); // Remove from the map
+          console.log(`Stopped job for group ${groupId}.`);
+        }
+
+        await Schedule.deleteOne({ groupId });
+        ctx.reply(`Removed schedule.`);
+      } else {
+        ctx.reply(`No schedule found for this group.`);
       }
-    );
-
-    // Store the job ID in the scheduleData and jobMap
-    scheduleData.jobId = job.id; // Assign job ID to scheduleData
-    await scheduleData.save(); // Save the updated schedule with job ID
-    jobMap.set(job.id, job); // Store the job in the jobMap
-  } catch (error) {
-    ctx.reply(`Something went wrong!`);
+    } catch (error) {
+      console.error("Error removing schedule:", error);
+      ctx.reply("Error removing schedule. Please try again.");
+    }
   }
 });
 
-// Command to remove a scheduled message
-bot.command("remove_schedule", async (ctx) => {
-  if (!isAdmin(ctx)) {
-    return ctx.reply("You do not have permission to use this command.");
-  }
-
-  const [groupId] = ctx.message.text.split(" ").slice(1);
-
-  if (!groupId) {
-    return ctx.reply("Usage: /remove_schedule <groupId>");
-  }
-
+bot.on("message", async (ctx) => {
   try {
-    const schedule = await Schedule.findOne({ groupId });
+    const action = ctx.session.currentAction;
 
-    if (schedule) {
-      // Stop the corresponding cron job if it exists
-      const job = jobMap.get(schedule.jobId);
-      if (job) {
-        job.stop();
-        jobMap.delete(schedule.jobId); // Remove from the map
-        console.log(`Stopped job for group ${groupId}.`);
-      }
+    if (action && action.type === "add") {
+      const { groupId } = action;
+      const [time] = ctx.message.text.split(" ").slice(0);
 
-      await Schedule.deleteOne({ groupId });
-      ctx.reply(`Removed schedule for group ${groupId}.`);
-      console.log(`Removed schedule for group ${groupId}.`);
-    } else {
-      ctx.reply(`No schedule found for group ${groupId}.`);
+      const scheduleData = new Schedule({
+        groupId,
+        scheduleTime: time,
+      });
+
+      const group = await Group.findOne({ telegramId: groupId });
+      await scheduleData.save();
+      ctx.reply(`Schedule set for group ${group?.groupName} at ${time}`);
+
+      console.log("time.split", time.split(":"));
+
+      const job = cron.schedule(
+        `${time.split(":")[1]} ${time.split(":")[0]} * * *`,
+        async () => {
+          const group = await Group.findOne({ telegramId: groupId });
+          if (group) {
+            const question = "Assalomu alaykum Zoom darsligiga tayyormisiz? 😁";
+            const options = ["Ha", "Yo'q"];
+
+            await ctx.api.sendPoll(groupId, question, options, {
+              is_anonymous: false,
+              allows_multiple_answers: false,
+            });
+          }
+        }
+      );
+
+      jobMap.set(groupId, job);
+      ctx.session.currentAction = null;
     }
   } catch (error) {
-    console.error("Error removing schedule:", error);
-    ctx.reply("Error removing schedule. Please try again.");
+    console.log("Error, botOnMessage:", error);
+    ctx.reply(`Something went wrong!`);
   }
 });
 
