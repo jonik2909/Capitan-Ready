@@ -3,12 +3,19 @@ const mongoose = require("mongoose");
 const ScheduleSchema = new mongoose.Schema(
   {
     groupId: { type: String, required: true, unique: true },
-    scheduleTime: { type: String, required: true },
+    scheduleTimes: [
+      {
+        day: {
+          type: String,
+          enum: ["0", "1", "2", "3", "4", "5", "6"], // Sunday = 0, Monday = 1, etc.
+          required: true,
+        },
+        time: { type: String, required: true }, // Format: HH:MM
+      },
+    ],
   },
   { timestamps: true }
 );
-
-ScheduleSchema.index({ groupId: 1, scheduleTime: 1 }, { unique: true });
 
 const Schedule = mongoose.model("Schedule", ScheduleSchema);
 
