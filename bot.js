@@ -37,7 +37,7 @@ const DAYS_OF_WEEK = {
 const isValidTimeFormat = (time) =>
   /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(time);
 
-const createCronJob = (dayTime, groupId, ctx) => {
+const createCronJob = (dayTime, groupId, api) => {
   const [hours, minutes] = dayTime.time.split(":");
   const cronPattern = `${minutes} ${hours} * * ${dayTime.day}`;
 
@@ -47,7 +47,7 @@ const createCronJob = (dayTime, groupId, ctx) => {
       try {
         const group = await Group.findOne({ telegramId: groupId });
         if (group) {
-          await ctx.api.sendPoll(
+          await api.sendPoll(
             groupId,
             "Assalomu alaykum, Zoom darsligiga tayyormisiz?",
             ["ha", "yo'q"],
@@ -63,13 +63,60 @@ const createCronJob = (dayTime, groupId, ctx) => {
     },
     {
       scheduled: true,
-      timezone: "Asia/Seoul", // Add this line to set the timezone to Seoul
+      timezone: "Asia/Seoul",
     }
   );
 };
 
 const bot = new Bot(process.env.TOKEN);
 const jobMap = new Map();
+
+let restarting = false;
+
+async function stopAllCronJobs() {
+  for (const job of jobMap.values()) {
+    try {
+      job.stop();
+    } catch (e) {
+      console.error("Error stopping job:", e);
+    }
+  }
+  jobMap.clear();
+}
+
+async function rescheduleAllFromDb(api) {
+  const schedules = await Schedule.find({});
+  for (const doc of schedules) {
+    const { groupId, scheduleTimes } = doc;
+    for (const dayTime of scheduleTimes) {
+      const key = `${groupId}-${dayTime.day}`;
+      // Replace existing if any
+      const existing = jobMap.get(key);
+      if (existing) {
+        try {
+          existing.stop();
+        } catch {}
+        jobMap.delete(key);
+      }
+      const job = createCronJob(dayTime, groupId, api);
+      jobMap.set(key, job);
+    }
+  }
+}
+
+async function restartSchedules(api) {
+  if (restarting) return;
+  restarting = true;
+  try {
+    await stopAllCronJobs();
+    await rescheduleAllFromDb(api);
+  } catch (e) {
+    console.error("Restart schedules failed:", e);
+    throw e;
+  } finally {
+    restarting = false;
+  }
+}
 
 // Middleware
 bot.use(
@@ -119,7 +166,6 @@ bot.on("my_chat_member", async (ctx) => {
           groupData,
           { upsert: true, new: true, setDefaultsOnInsert: true }
         );
-        console.log("Group data saved:", group);
       } catch (error) {
         console.error("Error saving group data:", error);
       }
@@ -242,7 +288,10 @@ bot.on("callback_query:data", adminMiddleware, async (ctx) => {
   }
 });
 
-bot.on("message", async (ctx) => {
+bot.on("message", async (ctx, next) => {
+  // Komandalarni umumiy handlerdan chiqarib yuborish
+  if (ctx.message?.text?.startsWith("/")) return next(); // <-- muhim o'zgarish
+
   const action = ctx.session.currentAction;
   if (action === "enter_time") {
     const time = ctx.message.text.trim();
@@ -252,12 +301,10 @@ bot.on("message", async (ctx) => {
       );
       return;
     }
-
     ctx.session.scheduleSetup.daysAndTimes.push({
       day: ctx.session.scheduleSetup.selectedDay,
       time,
     });
-
     await ctx.reply("Day and time added!");
     await showDaySelectionMenu(ctx);
     ctx.session.currentAction = null;
@@ -414,9 +461,9 @@ async function saveAndSchedule(ctx) {
     const schedule = new Schedule({ groupId, scheduleTimes: daysAndTimes });
     await schedule.save();
 
-    // Create cron jobs
+    // Create cron jobs (use bot.api)
     daysAndTimes.forEach((dayTime) => {
-      const job = createCronJob(dayTime, groupId, ctx);
+      const job = createCronJob(dayTime, groupId, bot.api);
       jobMap.set(`${groupId}-${dayTime.day}`, job);
     });
 
@@ -450,13 +497,26 @@ async function cleanupGroupData(groupId) {
       Schedule.deleteOne({ groupId }),
       Group.deleteOne({ telegramId: groupId }),
     ]);
-
-    console.log(`Cleaned up data for group ${groupId}`);
   } catch (error) {
     console.error(`Error cleaning up group data for ${groupId}:`, error);
   }
 }
 
+// Avvalgi bot.command("restart") ni o'rniga hears bilan aniq moslashtirish
+bot.hears(/^\/restart(@\w+)?$/, adminMiddleware, async (ctx) => {
+  try {
+    await ctx.reply("Restart boshlanmoqda...");
+    await restartSchedules(bot.api);
+    await ctx.reply("Barcha schedulalar DB dan qayta yuklandi ✅");
+  } catch (e) {
+    console.error("Restart error:", e);
+    await ctx.reply("Restart muvaffaqiyatsiz ❌");
+  }
+});
+
 bot.catch((err) => console.error("Error in bot:", err));
+
+// Optionally expose for app-start bootstrap
+bot.restartSchedules = () => restartSchedules(bot.api);
 
 module.exports = bot;
